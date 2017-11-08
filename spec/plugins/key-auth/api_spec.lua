@@ -2,7 +2,7 @@ local json = require "cjson"
 local http_client = require "kong.tools.http_client"
 local spec_helper = require "spec.spec_helpers"
 
-describe("Key Auth Credentials API", function()
+describe("key-auth credentials API", function()
   local BASE_URL, credential, consumer
 
   setup(function()
@@ -18,7 +18,7 @@ describe("Key Auth Credentials API", function()
 
     setup(function()
       local fixtures = spec_helper.insert_fixtures {
-        consumer = {{ username = "bob" }}
+        consumer = {{ username = "bob" }, { username = "bob2" }}
       }
       consumer = fixtures.consumer[1]
       BASE_URL = spec_helper.API_URL.."/consumers/bob/key-auth/"
@@ -85,6 +85,12 @@ describe("Key Auth Credentials API", function()
         assert.equal(200, status)
         local body = json.decode(response)
         assert.equals(credential.id, body.id)
+      end)
+      it("should retrieve by id and match the consumer id", function()
+        local _, status = http_client.get(spec_helper.API_URL.."/consumers/bob/key-auth/"..credential.id)
+        assert.equal(200, status)
+        local _, status = http_client.get(spec_helper.API_URL.."/consumers/bob2/key-auth/"..credential.id)
+        assert.equal(404, status)
       end)
 
     end)

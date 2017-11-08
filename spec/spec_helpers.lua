@@ -2,12 +2,15 @@
 -- It is built so that it only needs to be required at the beginning of any spec file.
 -- It supports other environments by passing a configuration file.
 
-local IO = require "kong.tools.io"
-local Faker = require "kong.tools.faker"
-local Migrations = require "kong.tools.migrations"
-local Threads = require "llthreads2.ex"
-
 require "kong.tools.ngx_stub"
+
+local IO = require "kong.tools.io"
+local dao_loader = require "kong.tools.dao_loader"
+local Faker = require "kong.tools.faker"
+local config = require "kong.tools.config_loader"
+local Threads = require "llthreads2.ex"
+local Events = require "kong.core.events"
+local stringy = require "stringy"
 
 local _M = {}
 
@@ -30,11 +33,13 @@ _M.envs = {}
 -- When dealing with another configuration file for a few tests, this allows to add
 -- a factory/migrations/faker that are environment-specific to this new config.
 function _M.add_env(conf_file)
-  local env_configuration, env_factory = IO.load_configuration_and_dao(conf_file)
+  local env_configuration = config.load(conf_file)
+  local events = Events()
+  local env_factory = dao_loader.load(env_configuration, events)
   _M.envs[conf_file] = {
     configuration = env_configuration,
     dao_factory = env_factory,
-    migrations = Migrations(env_factory, env_configuration),
+    events = events,
     conf_file = conf_file,
     faker = Faker(env_factory)
   }
@@ -50,29 +55,41 @@ function _M.remove_env(conf_file)
   _M.envs[conf_file] = nil
 end
 
+local function wait_process(pid_file)
+  while(IO.file_exists(pid_file)) do
+    local pid = IO.read_file(pid_file)
+    local _, code = IO.os_execute("kill -0 "..stringy.strip(pid))
+    if code and code ~= 0 then
+      break
+    end
+  end
+end
+
 --
 -- OS and bin/kong helpers
 --
-local function kong_bin(signal, conf_file, skip_wait)
+local function kong_bin(signal, conf_file)
   local env = _M.get_env(conf_file)
   local result, exit_code = IO.os_execute(_M.KONG_BIN.." "..signal.." -c "..env.conf_file)
-
   if exit_code ~= 0 then
     error("spec_helper cannot "..signal.." kong: \n"..result)
   end
 
-  if signal == "start" and not skip_wait then
-    os.execute("while ! [ -f "..env.configuration.pid_file.." ]; do sleep 0; done")
-  elseif signal == "quit" or signal == "stop" then
-    os.execute("while [ -f "..env.configuration.pid_file.." ]; do sleep 0; done")
+  -- Wait for processes to exit
+  if signal == "stop" then
+    wait_process(env.configuration.nginx_working_dir.."/nginx.pid")
+    wait_process(env.configuration.nginx_working_dir.."/serf.pid")
+    wait_process(env.configuration.nginx_working_dir.."/dnsmasq.pid")
+  elseif signal == "quit" then
+    wait_process(env.configuration.nginx_working_dir.."/nginx.pid")
   end
 
   return result, exit_code
 end
 
-for _, signal in ipairs({ "start", "stop", "restart", "reload", "quit" }) do
-  _M[signal.."_kong"] = function(conf_file, skip_wait)
-    return kong_bin(signal, conf_file, skip_wait)
+for _, signal in ipairs({ "start", "stop", "restart", "reload", "quit", "status" }) do
+  _M[signal.."_kong"] = function(conf_file)
+    return kong_bin(signal, conf_file)
   end
 end
 
@@ -95,8 +112,8 @@ function _M.find_port(exclude)
   end
 
   -- Finding an available port
-  local handle = io.popen([[(netstat  -atn | awk '{printf "%s\n%s\n", $4, $4}' | grep -oE '[0-9]*$'; seq 32768 61000) | sort -n | uniq -u | head -n 1]])
-  local result = handle:read("*a")
+  local handle = io.popen([[(netstat  -atn | awk '{printf "%s\n%s\n", $4, $4}' | grep -oE '[0-9]*$'; seq 32768 61000) | sort -n | uniq -u]])
+  local result = (handle:read("*a") .. "\n"):match("^(.-)\n")
   handle:close()
 
   -- Closing the opened servers
@@ -107,18 +124,22 @@ function _M.find_port(exclude)
   return tonumber(result)
 end
 
--- Starts a TCP server
+-- Starts a TCP server, accepting a single connection and then closes
 -- @param `port`    The port where the server will be listening to
 -- @return `thread` A thread object
 function _M.start_tcp_server(port, ...)
   local thread = Threads.new({
     function(port)
       local socket = require "socket"
-      local server = assert(socket.bind("*", port))
+      local server = assert(socket.tcp())
+      assert(server:setoption('reuseaddr', true))
+      assert(server:bind("*", port))
+      assert(server:listen())
       local client = server:accept()
       local line, err = client:receive()
       if not err then client:send(line .. "\n") end
       client:close()
+      server:close()
       return line
     end;
   }, port)
@@ -127,14 +148,17 @@ function _M.start_tcp_server(port, ...)
 end
 
 
--- Starts a HTTP server
+-- Starts a HTTP server, accepting a single connection and then closes
 -- @param `port`    The port where the server will be listening to
 -- @return `thread` A thread object
 function _M.start_http_server(port, ...)
   local thread = Threads.new({
     function(port)
       local socket = require "socket"
-      local server = assert(socket.bind("*", port))
+      local server = assert(socket.tcp())
+      assert(server:setoption('reuseaddr', true))
+      assert(server:bind("*", port))
+      assert(server:listen())
       local client = server:accept()
 
       local lines = {}
@@ -153,11 +177,13 @@ function _M.start_http_server(port, ...)
       end
 
       if err then
+        server:close()
         error(err)
       end
 
       client:send("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
       client:close()
+      server:close()
       return lines
     end;
   }, port)
@@ -165,16 +191,18 @@ function _M.start_http_server(port, ...)
   return thread:start(...)
 end
 
--- Starts a UDP server
+-- Starts a UDP server, accepting a single connection and then closes
 -- @param `port`    The port where the server will be listening to
 -- @return `thread` A thread object
 function _M.start_udp_server(port, ...)
   local thread = Threads.new({
     function(port)
-      local socket = require("socket")
-      local udp = socket.udp()
-      udp:setsockname("*", port)
-      local data = udp:receivefrom()
+      local socket = require "socket"
+      local server = assert(socket.udp())
+      server:setoption('reuseaddr', true)
+      server:setsockname("*", port)
+      local data = server:receivefrom()
+      server:close()
       return data
     end;
   }, port)
@@ -189,8 +217,8 @@ function _M.prepare_db(conf_file)
   local env = _M.get_env(conf_file)
 
   -- 1. Migrate our keyspace
-  local err = env.migrations:run_all_migrations()
-  if err then
+  local ok, err = env.dao_factory:run_migrations()
+  if not ok then
     error(err)
   end
 
@@ -200,10 +228,7 @@ end
 
 function _M.drop_db(conf_file)
   local env = _M.get_env(conf_file)
-  local err = env.dao_factory:drop()
-  if err then
-    error(err)
-  end
+  env.dao_factory:truncate_tables()
 end
 
 function _M.seed_db(amount, conf_file)
@@ -214,6 +239,26 @@ end
 function _M.insert_fixtures(fixtures, conf_file)
   local env = _M.get_env(conf_file)
   return env.faker:insert_from_table(fixtures)
+end
+
+function _M.default_config()
+  return config.default_config()
+end
+
+function _M.for_each_dao(f)
+  local defaults = require "kong.tools.config_defaults"
+  local env = _M.get_env()
+  local databases = defaults.database.enum
+  local DB_TYPES = {}
+
+  for _, v in ipairs(databases) do
+    DB_TYPES[v:upper()] = v
+  end
+
+  for _, v in ipairs(databases) do
+    local properties = env.configuration[v]
+    f(v, properties, DB_TYPES)
+  end
 end
 
 -- Add the default env to our spec_helper

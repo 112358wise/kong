@@ -7,7 +7,7 @@ return {
       self.params.consumer_id = self.consumer.id
     end,
 
-    GET = function(self, dao_factory, helpers)
+    GET = function(self, dao_factory)
       crud.paginated_set(self, dao_factory.acls)
     end,
 
@@ -25,13 +25,11 @@ return {
       crud.find_consumer_by_username_or_id(self, dao_factory, helpers)
       self.params.consumer_id = self.consumer.id
 
-      local data, err = dao_factory.acls:find_by_keys({ id = self.params.id })
+      local err
+      self.acl, err = dao_factory.acls:find(self.params)
       if err then
         return helpers.yield_error(err)
-      end
-
-      self.acl = data[1]
-      if not self.acl then
+      elseif self.acl == nil then
         return helpers.responses.send_HTTP_NOT_FOUND()
       end
     end,
@@ -41,7 +39,7 @@ return {
     end,
 
     PATCH = function(self, dao_factory)
-      crud.patch(self.params, self.acl, dao_factory.acls)
+      crud.patch(self.params, dao_factory.acls, self.acl)
     end,
 
     DELETE = function(self, dao_factory)

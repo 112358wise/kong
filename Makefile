@@ -1,8 +1,8 @@
 TESTING_CONF = kong_TEST.yml
 DEVELOPMENT_CONF = kong_DEVELOPMENT.yml
-DEV_ROCKS=busted luacov luacov-coveralls luacheck
+DEV_ROCKS = busted luacov luacov-coveralls luacheck
 
-.PHONY: install dev clean start restart seed drop lint test test-integration test-plugins test-all coverage
+.PHONY: install dev clean doc lint test test-integration test-plugins test-all coverage
 
 install:
 	@if [ `uname` = "Darwin" ]; then \
@@ -15,15 +15,15 @@ install:
 
 dev: install
 	@for rock in $(DEV_ROCKS) ; do \
-		if ! command -v $$rock &> /dev/null ; then \
+		if ! command -v $$rock > /dev/null ; then \
       echo $$rock not found, installing via luarocks... ; \
       luarocks install $$rock ; \
     else \
       echo $$rock already installed, skipping ; \
     fi \
 	done;
-	bin/kong config -c kong.yml -e TEST
-	bin/kong config -c kong.yml -e DEVELOPMENT
+	bin/kong config -c kong.yml -e TEST -s TEST
+	bin/kong config -c kong.yml -e DEVELOPMENT -s DEVELOPMENT
 	bin/kong migrations -c $(DEVELOPMENT_CONF) up
 
 clean:
@@ -32,23 +32,18 @@ clean:
 	rm -f luacov.*
 	rm -rf nginx_tmp
 
-start:
-	@bin/kong start -c $(DEVELOPMENT_CONF)
-
-stop:
-	@bin/kong stop -c $(DEVELOPMENT_CONF)
-
-restart:
-	@bin/kong restart -c $(DEVELOPMENT_CONF)
-
-seed:
-	@bin/kong db -c $(DEVELOPMENT_CONF) seed
-
-drop:
-	@bin/kong db -c $(DEVELOPMENT_CONF) drop
+doc:
+	@ldoc -c config.ld kong
 
 lint:
-	@find kong spec -name '*.lua' -not -name 'invalid-module.lua' -not -path 'kong/vendor/*' | xargs luacheck -q
+	@luacheck -q . \
+						--exclude-files 'kong/vendor/**/*.lua' \
+						--exclude-files 'spec/unit/fixtures/invalid-module.lua' \
+						--std 'ngx_lua+busted' \
+						--globals '_KONG' \
+						--globals 'ngx' \
+						--no-redefined \
+						--no-unused-args
 
 test:
 	@busted -v spec/unit

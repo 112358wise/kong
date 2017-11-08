@@ -52,10 +52,10 @@ local function with_body(method)
       if type(body) == "table" then
         body = json.encode(body)
       end
-    else
+    elseif headers["content-type"] ~= "text/plain" then
       headers["content-type"] = "application/x-www-form-urlencoded"
       if type(body) == "table" then
-        body = ngx.encode_args(body)
+        body = ngx.encode_args(body, true)
       end
     end
 
@@ -75,7 +75,7 @@ local function without_body(method)
     if not headers then headers = {} end
 
     if querystring then
-      url = string.format("%s?%s", url, ngx.encode_args(querystring))
+      url = string.format("%s?%s", url, ngx.encode_args(querystring, true))
     end
 
     return http_call {
@@ -99,8 +99,9 @@ function _M.post_multipart(url, form, headers)
 
   local boundary = "8fd84e9444e3946c"
   local body = ""
+
   for k, v in pairs(form) do
-    body = body.."--"..boundary.."\r\nContent-Disposition: form-data; name=\""..k.."\"\r\n\r\n"..v.."\r\n"
+    body = body.."--"..boundary.."\r\nContent-Disposition: form-data; name=\""..k.."\"\r\n\r\n"..tostring(v).."\r\n"
   end
 
   if body ~= "" then

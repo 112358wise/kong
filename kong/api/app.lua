@@ -2,93 +2,41 @@ local lapis = require "lapis"
 local utils = require "kong.tools.utils"
 local stringy = require "stringy"
 local responses = require "kong.tools.responses"
+local singletons = require "kong.singletons"
 local app_helpers = require "lapis.application"
+local api_helpers = require "kong.api.api_helpers"
+
+local find = string.find
+
 local app = lapis.Application()
-
--- Parses a form value, handling multipart/data values
--- @param `v` The value object
--- @return The parsed value
-local function parse_value(v)
-  return type(v) == "table" and v.content or v -- Handle multipart
-end
-
--- Put nested keys in objects:
--- Normalize dotted keys in objects.
--- Example: {["key.value.sub"]=1234} becomes {key = {value = {sub=1234}}
--- @param `obj` Object to normalize
--- @return `normalized_object`
-local function normalize_nested_params(obj)
-  local new_obj = {}
-
-  local function attach_dotted_key(keys, attach_to, value)
-    local current_key = keys[1]
-
-    if #keys > 1 then
-      if not attach_to[current_key] then
-        attach_to[current_key] = {}
-      end
-      table.remove(keys, 1)
-      attach_dotted_key(keys, attach_to[current_key], value)
-    else
-      attach_to[current_key] = value
-    end
-  end
-
-  for k, v in pairs(obj) do
-    if type(v) == "table" then
-      -- normalize arrays since Lapis parses ?key[1]=foo as {["1"]="foo"} instead of {"foo"}
-      if utils.is_array(v) then
-        local arr = {}
-        for _, arr_v in pairs(v) do table.insert(arr, arr_v) end
-        v = arr
-      else
-        v = normalize_nested_params(v) -- recursive call on other table values
-      end
-    end
-
-    -- normalize sub-keys with dot notation
-    local keys = stringy.split(k, ".")
-    if #keys > 1 then -- we have a key containing a dot
-      attach_dotted_key(keys, new_obj, parse_value(v))
-    else
-      new_obj[k] = parse_value(v) -- nothing special with that key, simply attaching the value
-    end
-  end
-
-  return new_obj
-end
-
-local function default_on_error(self)
-  local err = self.errors[1]
-  if type(err) == "table" then
-    if err.database then
-      return responses.send_HTTP_INTERNAL_SERVER_ERROR(err.message)
-    elseif err.unique then
-      return responses.send_HTTP_CONFLICT(err.message)
-    elseif err.foreign then
-      return responses.send_HTTP_NOT_FOUND(err.message)
-    elseif err.invalid_type and err.message.id then
-      return responses.send_HTTP_BAD_REQUEST(err.message)
-    else
-      return responses.send_HTTP_BAD_REQUEST(err.message)
-    end
-  end
-end
 
 local function parse_params(fn)
   return app_helpers.json_params(function(self, ...)
     local content_type = self.req.headers["content-type"]
-    if content_type and string.find(content_type:lower(), "application/json", nil, true) then
+    if content_type and find(content_type:lower(), "application/json", nil, true) then
       if not self.json then
         return responses.send_HTTP_BAD_REQUEST("Cannot parse JSON body")
       end
     end
-    self.params = normalize_nested_params(self.params)
+    self.params = api_helpers.normalize_nested_params(self.params)
     return fn(self, ...)
   end)
 end
 
-app.parse_params = parse_params
+local function on_error(self)
+  local err = self.errors[1]
+  if type(err) == "table" then
+    if err.db then
+      return responses.send_HTTP_INTERNAL_SERVER_ERROR(err.message)
+    elseif err.unique then
+      return responses.send_HTTP_CONFLICT(err.tbl)
+    elseif err.foreign then
+      return responses.send_HTTP_NOT_FOUND(err.tbl)
+    else
+      return responses.send_HTTP_BAD_REQUEST(err.tbl or err.message)
+    end
+  end
+end
 
 app.default_route = function(self)
   local path = self.req.parsed_url.path:match("^(.*)/$")
@@ -117,6 +65,16 @@ app.handle_error = function(self, err, trace)
   return responses.send_HTTP_INTERNAL_SERVER_ERROR()
 end
 
+app:before_filter(function(self)
+  local method = ngx.req.get_method()
+  if method ~= "GET" and method ~= "DELETE" then
+    local content_type = self.req.headers["content-type"]
+    if not content_type or stringy.strip(content_type) == "" then
+      return responses.send_HTTP_UNSUPPORTED_MEDIA_TYPE()
+    end
+  end
+end)
+
 local handler_helpers = {
   responses = responses,
   yield_error = app_helpers.yield_error
@@ -125,12 +83,12 @@ local handler_helpers = {
 local function attach_routes(routes)
   for route_path, methods in pairs(routes) do
     if not methods.on_error then
-      methods.on_error = default_on_error
+      methods.on_error = on_error
     end
 
     for k, v in pairs(methods) do
       local method = function(self)
-        return v(self, dao, handler_helpers)
+        return v(self, singletons.dao, handler_helpers)
       end
       methods[k] = parse_params(method)
     end
@@ -140,14 +98,14 @@ local function attach_routes(routes)
 end
 
 -- Load core routes
-for _, v in ipairs({"kong", "apis", "consumers", "plugins"}) do
+for _, v in ipairs({"kong", "apis", "consumers", "plugins", "cache", "cluster" }) do
   local routes = require("kong.api.routes."..v)
   attach_routes(routes)
 end
 
 -- Loading plugins routes
-if configuration and configuration.plugins_available then
-  for _, v in ipairs(configuration.plugins_available) do
+if singletons.configuration and singletons.configuration.plugins then
+  for _, v in ipairs(singletons.configuration.plugins) do
     local loaded, mod = utils.load_module_if_exists("kong.plugins."..v..".api")
     if loaded then
       ngx.log(ngx.DEBUG, "Loading API endpoints for plugin: "..v)

@@ -1,7 +1,14 @@
-local stringy = require "stringy"
 local utils = require "kong.tools.utils"
-local constants = require "kong.constants"
+local stringy = require "stringy"
 local responses = require "kong.tools.responses"
+
+local pairs = pairs
+local ipairs = ipairs
+local tonumber = tonumber
+local math_max = math.max
+
+local RATELIMIT_LIMIT = "X-RateLimit-Limit"
+local RATELIMIT_REMAINING = "X-RateLimit-Remaining"
 
 local _M = {}
 
@@ -23,6 +30,8 @@ local function parse_header(header_value, limits)
 end
 
 function _M.execute(conf)
+  ngx.ctx.increments = {}
+  
   if utils.table_size(conf.limits) <= 0 then
     return
   end
@@ -32,12 +41,13 @@ function _M.execute(conf)
   ngx.ctx.increments = increments
 
   local usage = ngx.ctx.usage -- Load current usage
+  if not usage then return end
 
   local stop
   for limit_name, v in pairs(usage) do
     for period_name, lv in pairs(usage[limit_name]) do
-      ngx.header[constants.HEADERS.RATELIMIT_LIMIT.."-"..limit_name.."-"..period_name] = lv.limit
-      ngx.header[constants.HEADERS.RATELIMIT_REMAINING.."-"..limit_name.."-"..period_name] = math.max(0, lv.remaining - (increments[limit_name] and increments[limit_name] or 0)) -- increment_value for this current request
+      ngx.header[RATELIMIT_LIMIT.."-"..limit_name.."-"..period_name] = lv.limit
+      ngx.header[RATELIMIT_REMAINING.."-"..limit_name.."-"..period_name] = math_max(0, lv.remaining - (increments[limit_name] and increments[limit_name] or 0)) -- increment_value for this current request
 
       if increments[limit_name] and increments[limit_name] > 0 and lv.remaining <= 0 then
         stop = true -- No more

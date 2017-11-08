@@ -24,11 +24,11 @@ return {
       return helpers.responses.send_HTTP_OK(self.consumer)
     end,
 
-    PATCH = function(self, dao_factory, helpers)
-      crud.patch(self.params, self.consumer, dao_factory.consumers)
+    PATCH = function(self, dao_factory)
+      crud.patch(self.params, dao_factory.consumers, self.consumer)
     end,
 
-    DELETE = function(self, dao_factory, helpers)
+    DELETE = function(self, dao_factory)
       crud.delete(self.consumer, dao_factory.consumers)
     end
   }

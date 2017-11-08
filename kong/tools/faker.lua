@@ -27,6 +27,11 @@ function Faker:fake_entity(type)
       name = "rate-limiting",
       config = { second = 10 }
     }
+  elseif type == "node" then
+    return {
+      name = "random_name_"..r,
+      cluster_listening_address = "random_address_"..r
+    }
   else
     error("Entity of type "..type.." cannot be generated.")
   end

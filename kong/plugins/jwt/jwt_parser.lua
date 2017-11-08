@@ -1,6 +1,5 @@
---- JWT verification module
---
--- Adapted version of x25/luajwt for Kong. It provide various improvements and
+-- JWT verification module
+-- Adapted version of x25/luajwt for Kong. It provides various improvements and
 -- an OOP architecture allowing the JWT to be parsed and verified separatly,
 -- avoiding multiple parsings.
 --
@@ -19,19 +18,21 @@ local string_rep = string.rep
 local setmetatable = setmetatable
 
 --- Supported algorithms for signing tokens.
--- Only support HS256 for our use case.
 local alg_sign = {
-  ["HS256"] = function(data, key) return crypto.hmac.digest("sha256", data, key, true) end
+  ["HS256"] = function(data, key) return crypto.hmac.digest("sha256", data, key, true) end,
   --["HS384"] = function(data, key) return crypto.hmac.digest("sha384", data, key, true) end,
-  --["HS512"] = function(data, key) return crypto.hmac.digest("sha512", data, key, true) end,
+  --["HS512"] = function(data, key) return crypto.hmac.digest("sha512", data, key, true) end
+  ["RS256"] = function(data, key) return crypto.sign('sha256', data, crypto.pkey.from_pem(key, true)) end
 }
 
 --- Supported algorithms for verifying tokens.
--- Only support HS256 for our use case.
 local alg_verify = {
-  ["HS256"] = function(data, signature, key) return signature == alg_sign["HS256"](data, key) end
+  ["HS256"] = function(data, signature, key) return signature == alg_sign["HS256"](data, key) end,
   --["HS384"] = function(data, signature, key) return signature == alg_sign["HS384"](data, key) end,
-  --["HS512"] = function(data, signature, key) return signature == alg_sign["HS512"](data, key) end,
+  --["HS512"] = function(data, signature, key) return signature == alg_sign["HS512"](data, key) end
+  ["RS256"] = function(data, signature, key)
+    return crypto.verify('sha256', data, signature, crypto.pkey.from_pem(key))
+  end
 }
 
 --- base 64 encoding
@@ -98,7 +99,7 @@ local function decode_token(token)
     return nil, "Invalid JSON"
   end
 
-  if not header.typ or header.typ ~= "JWT" then
+  if header.typ and header.typ:upper() ~= "JWT" then
     return nil, "Invalid typ"
   end
 
@@ -173,6 +174,10 @@ end
 -- @return A boolean indicating if the signature if verified or not
 function _M:verify_signature(key)
   return alg_verify[self.header.alg](self.header_64.."."..self.claims_64, self.signature, key)
+end
+
+function _M:b64_decode(input)
+  return b64_decode(input)
 end
 
 --- Registered claims according to RFC 7519 Section 4.1

@@ -2,19 +2,15 @@ local utils = require "kong.tools.utils"
 local stringy = require "stringy"
 
 local POSSIBLE_TYPES = {
-  id = true,
   table = true,
   array = true,
   string = true,
   number = true,
   boolean = true,
-  url = true,
-  timestamp = true
+  url = true
 }
 
 local custom_types_validation = {
-  ["id"] = function(v) return type(v) == "string" end,
-  ["timestamp"] = function(v) return type(v) == "number" end,
   ["url"] = function(v)
     if v and type(v) == "string" then
       local parsed_url = require("socket.url").parse(v)
@@ -24,7 +20,9 @@ local custom_types_validation = {
       return parsed_url and parsed_url.path and parsed_url.host and parsed_url.scheme
     end
   end,
-  ["array"] = function(v) return utils.is_array(v) end
+  ["array"] = function(v)
+    return utils.is_array(v)
+  end
 }
 
 local function validate_type(field_type, value)
@@ -36,19 +34,27 @@ end
 
 local _M = {}
 
--- Validate a table against a given schema
--- @param  `tbl`       Entity to validate, as a table.
--- @param  `schema`    Schema against which to validate the entity.
--- @param  `options`
---           `dao_insert` A function called foe each field with a `dao_insert_value` property.
---           `is_update`  For an entity update, check immutable fields. Set to true.
--- @return `valid`     Success of validation. True or false.
--- @return `errors`    A list of encountered errors during the validation.
+--- Validate a table against a given schema.
+-- @param[type=table] tbl A table representing the entity to validate.
+-- @param[type=table] schema Schema against which to validate the entity.
+-- @param[type=table] options (**Optional**) Can contain a `dao_insert` field, which will be called
+-- for each schema field with a `dao_insert_value` property. An `update` boolean, if the validation
+-- is performed during an update of the entity, and a `full_update` boolean, if the validaiton is
+-- performed during a full update of the entity.
+-- @treturn boolean `ok`: A boolean describing if the entity was valid not not.
+-- @treturn table `errors`: A list of errors describing the invalid properties of the entity. Those errors
+-- are purely related to schema validation, unlike the third return value.
+-- @treturn table `self_check_error`: If any, an error returned by the `self_check` function of a schema.
+-- This error is not returned in the second return value because it might be unrelated to schema validation,
+-- and hence have a different error type (DB error for example).
 function _M.validate_entity(tbl, schema, options)
   if not options then options = {} end
-  local errors
+  if not options.old_t then options.old_t = {} end
 
-  local key_values = { [""] = tbl } -- By default is only one element
+  local errors
+  local partial_update = options.update and not options.full_update
+
+  local key_values = {[""] = tbl} -- By default is only one element
 
   if schema.flexible then
     for k,v in pairs(tbl) do
@@ -68,7 +74,7 @@ function _M.validate_entity(tbl, schema, options)
         break
       end
 
-      if not options.partial_update and not options.full_update then
+      if not partial_update then
         for column, v in pairs(schema.fields) do
           -- [DEFAULT] Set default value for the field if given
           if t[column] == nil and v.default ~= nil then
@@ -78,30 +84,18 @@ function _M.validate_entity(tbl, schema, options)
               t[column] = utils.deep_copy(v.default)
             end
           end
-          -- [INSERT_VALUE]
-          if v.dao_insert_value and type(options.dao_insert) == "function" then
-            t[column] = options.dao_insert(v)
-          end
         end
       end
 
       -- Check the given table against a given schema
       for column, v in pairs(schema.fields) do
-        -- [IMMUTABLE] check immutability of a field if updating
-        if (options.partial_update or options.full_update) and t[column] ~= nil and v.immutable and not v.required then
-          errors = utils.add_error(errors, error_prefix..column, column.." cannot be updated")
-        end
-
-        -- [TYPE] Check if type is valid. Boolean and Numbers as strings are accepted and converted
+        -- [TYPE] Check if type is valid. Booleans and Numbers as strings are accepted and converted
         if t[column] ~= nil and v.type ~= nil then
           local is_valid_type
           -- ALIASES: number, timestamp, boolean and array can be passed as strings and will be converted
           if type(t[column]) == "string" then
             t[column] = stringy.strip(t[column])
-            if v.type == "number" or v .type == "timestamp" then
-              t[column] = tonumber(t[column])
-              is_valid_type = t[column] ~= nil
-            elseif v.type == "boolean" then
+            if v.type == "boolean" then
               local bool = t[column]:lower()
               is_valid_type = bool == "true" or bool == "false"
               t[column] = bool == "true"
@@ -110,6 +104,9 @@ function _M.validate_entity(tbl, schema, options)
               for arr_k, arr_v in ipairs(t[column]) do
                 t[column][arr_k] = stringy.strip(arr_v)
               end
+              is_valid_type = validate_type(v.type, t[column])
+            elseif v.type == "number" or v.type == "timestamp" then
+              t[column] = tonumber(t[column])
               is_valid_type = validate_type(v.type, t[column])
             else -- if string
               is_valid_type = validate_type(v.type, t[column])
@@ -123,8 +120,13 @@ function _M.validate_entity(tbl, schema, options)
           end
         end
 
+        -- [IMMUTABLE] check immutability of a field if updating
+        if v.immutable and options.update and (t[column] ~= nil and options.old_t[column] ~= nil and t[column] ~= options.old_t[column]) and not v.required then
+          errors = utils.add_error(errors, error_prefix..column, column.." cannot be updated")
+        end
+
         -- [ENUM] Check if the value is allowed in the enum.
-        if t[column] ~= nil and v.enum then
+        if t[column] ~= nil and v.enum ~= nil then
           local found = true
           local wrong_value = t[column]
           if v.type == "array" then
@@ -145,7 +147,7 @@ function _M.validate_entity(tbl, schema, options)
         end
 
         -- [REGEX] Check field against a regex if specified
-        if t[column] ~= nil and v.regex then
+        if type(t[column]) == "string" and v.regex then
           if not ngx.re.match(t[column], v.regex) then
             errors = utils.add_error(errors, error_prefix..column, column.." has an invalid value")
           end
@@ -169,7 +171,7 @@ function _M.validate_entity(tbl, schema, options)
               for sub_field_k, sub_field in pairs(sub_schema.fields) do
                 if sub_field.default ~= nil then -- Sub-value has a default, be polite and pre-assign the sub-value
                   t[column] = {}
-                elseif sub_field.required then -- Only check required if field doesn't have a default
+                elseif sub_field.required then -- Only check required if field doesn't have a default and dao_insert_value
                   errors = utils.add_error(errors, error_prefix..column, column.."."..sub_field_k.." is required")
                 end
               end
@@ -191,10 +193,15 @@ function _M.validate_entity(tbl, schema, options)
           end
         end
 
-        if not options.partial_update or t[column] ~= nil then
+        -- Check that full updates still meet the REQUIRED contraints
+        if options.full_update and v.required and (t[column] == nil or t[column] == "") then
+          errors = utils.add_error(errors, error_prefix..column, column.." is required")
+        end
+
+        if not partial_update or t[column] ~= nil then
           -- [REQUIRED] Check that required fields are set.
           -- Now that default and most other checks have been run.
-          if v.required and (t[column] == nil or t[column] == "") then
+          if v.required and not v.dao_insert_value and (t[column] == nil or t[column] == "") then
             errors = utils.add_error(errors, error_prefix..column, column.." is required")
           end
 
@@ -227,7 +234,7 @@ function _M.validate_entity(tbl, schema, options)
       end
 
       if errors == nil and type(schema.self_check) == "function" then
-        local ok, err = schema.self_check(schema, t, options.dao, (options.partial_update or options.full_update))
+        local ok, err = schema.self_check(schema, t, options.dao, options.update)
         if ok == false then
           return false, nil, err
         end
@@ -242,6 +249,22 @@ local digit = "[0-9a-f]"
 local uuid_pattern = "^"..table.concat({ digit:rep(8), digit:rep(4), digit:rep(4), digit:rep(4), digit:rep(12) }, '%-').."$"
 function _M.is_valid_uuid(uuid)
   return uuid and uuid:match(uuid_pattern) ~= nil
+end
+
+function _M.is_schema_subset(tbl, schema)
+  local errors
+
+  for k, v in pairs(tbl) do
+    if schema.fields[k] == nil then
+      errors = utils.add_error(errors, k, "unknown field")
+    elseif schema.fields[k].type == "id" and v ~= nil then
+      if not _M.is_valid_uuid(v) then
+        errors = utils.add_error(errors, k, v.."is not a valid uuid")
+      end
+    end
+  end
+
+  return errors == nil, errors
 end
 
 return _M
